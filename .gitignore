@@ -1,0 +1,19 @@
+# --- Python & Environment ---
+venv/
+__pycache__/
+*.pyc
+
+# --- Secrets & Credentials ---
+# Never commit your private keys!
+credentials.json
+.env
+
+# --- Project Specifics ---
+# Ignore your test PDFs if they contain real customer names/data
+*.pdf
+!spicy_order_template.pdf
+
+# --- Mac OS Junk ---
+.DS_Store
+
+.idea
