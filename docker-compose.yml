@@ -1,0 +1,10 @@
+services:
+  db:
+    image: postgres:16
+    container_name: spicy_db
+    environment:
+      POSTGRES_USER: nate
+      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: spicy_pepper_db
+    ports:
+      - "5432:5432"

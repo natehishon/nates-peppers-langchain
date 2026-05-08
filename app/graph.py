@@ -1,43 +1,54 @@
-import base64
 import os
-from dotenv import load_dotenv
 from typing import TypedDict, Optional
 from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from langgraph.graph import StateGraph, END
+from langgraph.types import interrupt  # New import for pausing
+from dotenv import load_dotenv
+import httpx
+import base64
+from .database import checkpointer
 
 load_dotenv()
 
 PROJECT_ID = os.getenv("GOOGLE_CLOUD_PROJECT")
 
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview",
-                                 project=PROJECT_ID)
-
 class ExtractionResult(BaseModel):
     customer_name: str
     pepper_variety: Optional[str] = Field(default=None)
     scoville_rating: Optional[int] = Field(default=None)
-    experience_level: Optional[int] = Field(default=None, description="Experience 1-10")
-
+    experience_level: Optional[int] = Field(default=None)
 
 class SignatureResult(BaseModel):
     is_signed: bool
-    confidence: float = Field(description="0-1 certainty of handwritten signature")
+    confidence: float
 
 
 class OrderState(TypedDict):
-    pdf_base64: str
+    pdf_url: str
+    pdf_base64: Optional[str]
     extraction: Optional[ExtractionResult]
     signature: Optional[SignatureResult]
     decision: str
     retry_count: int
     hint: str
 
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite-preview", project=PROJECT_ID)
 
 def extraction_node(state: OrderState):
+    try:
+        response = httpx.get(state["pdf_url"], follow_redirects=True, timeout=10.0)
+
+        response.raise_for_status()
+        pdf_bytes = response.content
+        pdf_b64 = base64.b64encode(pdf_bytes).decode("utf-8")
+    except Exception as e:
+        return {"hint": f"Download failed: {str(e)}", "retry_count": state["retry_count"] + 1}
+
+    pdf_base64 = base64.b64encode(pdf_bytes).decode("utf-8")
+
     if state["retry_count"] == 0:
-        print("\n[DEMO] Step 1: Simulating a failed/blurry extraction...")
         return {
             "extraction": ExtractionResult(
                 customer_name="Nate",
@@ -49,8 +60,6 @@ def extraction_node(state: OrderState):
             "hint": "The Scoville SHU was obscured by a digital artifact. Look closer at the table."
         }
 
-    print(f"\n[DEMO] Step 2: Retrying with Hint: {state['hint']}")
-
     structured_llm = llm.with_structured_output(ExtractionResult)
 
     base_prompt = "Extract customer name, pepper variety, Scoville SHU, and experience level (1-10)."
@@ -59,47 +68,41 @@ def extraction_node(state: OrderState):
 
     msg = HumanMessage(content=[
         {"type": "text", "text": base_prompt},
-        {"type": "media", "mime_type": "application/pdf", "data": state["pdf_base64"]}
+        {"type": "media", "mime_type": "application/pdf", "data": pdf_base64}
     ])
 
     result = structured_llm.invoke([msg])
-    return {"extraction": result, "retry_count": state["retry_count"] + 1}
+    return {"extraction": result, "retry_count": state["retry_count"] + 1, "pdf_base64": pdf_b64}
 
 
 def signature_node(state: OrderState):
     structured_llm = llm.with_structured_output(SignatureResult)
 
     prompt = """
-        Analyze the signature block. 
-        A valid signature must look like a deliberate, handwritten name or formalized mark.
+            Analyze the signature block. 
+            A valid signature must look like a deliberate, handwritten name or formalized mark.
 
-        Reject (is_signed=False) if:
-        - It is just a single 'squiggly line' or a dot.
-        - It looks like a random mark rather than a name.
-        - The signature line is blank.
+            Reject (is_signed=False) if:
+            - It is just a single 'squiggly line' or a dot.
+            - It looks like a random mark rather than a name.
+            - The signature line is blank.
 
-        If it is a 'scribble' that resembles initials but is barely legible, 
-        set is_signed=True but set confidence LOW (between 0.1 and 0.4).
-        """
+            If it is a 'scribble' that resembles initials but is barely legible, 
+            set is_signed=True but set confidence LOW (between 0.1 and 0.4).
+            """
     msg = HumanMessage(content=[{"type": "text", "text": prompt},
                                 {"type": "media", "mime_type": "application/pdf", "data": state["pdf_base64"]}])
 
     result = structured_llm.invoke([msg])
-    print(f"\n[DEBUG] Signature Found: {result.is_signed}")
-    print(f"[DEBUG] Signature Confidence: {result.confidence}")
 
     return {"signature": result}
 
 
 def manual_review_node(state: OrderState):
-    sig_info = "Signature not yet analyzed"
-    if state["signature"] is not None:
-        sig_info = f"Signature confidence: {state['signature'].confidence}"
-
-    print(f"\n[!] MANUAL REVIEW REQUIRED for {state['extraction'].customer_name}")
-    print(f"Status: {sig_info}")
-
-    choice = input("Approve this order anyway? (y/n): ")
+    choice = interrupt({
+        "info": "Manual review required",
+        "customer": state["extraction"].customer_name
+    })
 
     if choice.lower() == 'y':
         return {"decision": "APPROVED: Manually cleared by Nate."}
@@ -132,22 +135,6 @@ def safety_validation_node(state: OrderState):
     return {"decision": f"APPROVED: {ext.pepper_variety} verified and safe to ship."}
 
 
-def routing_logic(state: OrderState):
-    if 0.1 < state["signature"].confidence < 0.7:
-        return "manual_review"
-    return "validate_safety"
-
-
-def check_for_retry(state: OrderState):
-    if state["extraction"].pepper_variety and state["extraction"].scoville_rating:
-        return "verify_signature"
-
-    if state["retry_count"] < 3:
-        return "retry_extraction"
-
-    return "fail_incomplete"
-
-
 def extraction_router(state: OrderState):
     is_missing_data = not state["extraction"].pepper_variety or state["extraction"].scoville_rating is None
 
@@ -160,6 +147,12 @@ def extraction_router(state: OrderState):
 
     return "verify_signature"
 
+def review_router(state: OrderState):
+    if 0.1 < state["signature"].confidence < 0.7:
+        return "manual_review"
+    return "validate_safety"
+
+
 workflow = StateGraph(OrderState)
 
 workflow.add_node("extract_data", extraction_node)
@@ -169,47 +162,15 @@ workflow.add_node("manual_review", manual_review_node)
 
 workflow.set_entry_point("extract_data")
 
-workflow.add_conditional_edges(
-    "extract_data",
-    extraction_router,
-    {
-        "retry": "extract_data",
-        "verify_signature": "verify_signature",
-        "manual_review": "manual_review"
-    }
-)
+workflow.add_conditional_edges("extract_data", extraction_router, {
+    "retry": "extract_data", "verify_signature": "verify_signature", "manual_review": "manual_review"
+})
 
-workflow.add_conditional_edges(
-    "verify_signature",
-    routing_logic,
-    {
-        "manual_review": "manual_review",
-        "validate_safety": "validate_safety"
-    }
-)
+workflow.add_conditional_edges("verify_signature", review_router, {
+    "manual_review": "manual_review", "validate_safety": "validate_safety"
+})
 
 workflow.add_edge("manual_review", END)
 workflow.add_edge("validate_safety", END)
 
-app = workflow.compile()
-
-if __name__ == "__main__":
-    with open("spicy_order.pdf", "rb") as f:
-        pdf_data = base64.b64encode(f.read()).decode("utf-8")
-
-    initial_state = {
-        "pdf_base64": pdf_data,
-        "extraction": None,
-        "signature": None,
-        "decision": "",
-        "retry_count": 0,
-        "hint": ""
-    }
-
-    print("--- Nate's Spicy Pepper One-Order Audit ---")
-    final_state = app.invoke(initial_state)
-    print(f"\nResult: {final_state['decision']}")
-
-
-# todo Human-in-the-Loop with Persistent State
-# todo Fact-Checking - google search to double check data
+graph = workflow.compile(checkpointer=checkpointer)
