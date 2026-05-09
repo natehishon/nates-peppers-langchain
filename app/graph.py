@@ -72,7 +72,6 @@ def extraction_node(state: OrderState):
     ])
 
     result = structured_llm.invoke([msg])
-    print(f"[DEBUG] Signature Confidence: {result.confidence}")
     return {"extraction": result, "retry_count": state["retry_count"] + 1, "pdf_base64": pdf_b64}
 
 
@@ -150,7 +149,7 @@ def extraction_router(state: OrderState):
 
     return "verify_signature"
 
-def review_router(state: OrderState):
+def signature_router(state: OrderState):
     if 0.1 < state["signature"].confidence < 0.7:
         return "manual_review"
     return "validate_safety"
@@ -169,7 +168,7 @@ workflow.add_conditional_edges("extract_data", extraction_router, {
     "retry": "extract_data", "verify_signature": "verify_signature", "manual_review": "manual_review"
 })
 
-workflow.add_conditional_edges("verify_signature", review_router, {
+workflow.add_conditional_edges("verify_signature", signature_router, {
     "manual_review": "manual_review", "validate_safety": "validate_safety"
 })
 
