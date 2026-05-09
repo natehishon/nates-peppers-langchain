@@ -72,6 +72,7 @@ def extraction_node(state: OrderState):
     ])
 
     result = structured_llm.invoke([msg])
+    print(f"[DEBUG] Signature Confidence: {result.confidence}")
     return {"extraction": result, "retry_count": state["retry_count"] + 1, "pdf_base64": pdf_b64}
 
 
@@ -94,6 +95,8 @@ def signature_node(state: OrderState):
                                 {"type": "media", "mime_type": "application/pdf", "data": state["pdf_base64"]}])
 
     result = structured_llm.invoke([msg])
+    print(f"\n[DEBUG] Signature Found: {result.is_signed}")
+    print(f"[DEBUG] Signature Confidence: {result.confidence}")
 
     return {"signature": result}
 

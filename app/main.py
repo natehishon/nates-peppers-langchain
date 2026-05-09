@@ -77,7 +77,7 @@ async def start_audit(
 
         runnable = graph.with_config(config)
         initial_state = {
-            "pdf_url": pdf_url,  # Now using the permanent S3 link
+            "pdf_url": pdf_url,
             "extraction": None,
             "decision": "",
             "retry_count": 0
@@ -130,7 +130,7 @@ def resume_audit(thread_id: str, human_decision: str):
             raise HTTPException(status_code=404, detail="Order not found")
 
     try:
-        result = graph.invoke(
+        graph.invoke(
             Command(resume=human_decision),
             config=config,
             checkpointer=checkpointer
@@ -138,10 +138,11 @@ def resume_audit(thread_id: str, human_decision: str):
 
         with Session(engine) as session:
             order.status = "Completed"
+            order.decision = human_decision
             session.add(order)
             session.commit()
 
-        return {"status": "Resumed", "final_decision": result.get("decision")}
+        return {"status": "Resumed", "final_decision": human_decision}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
